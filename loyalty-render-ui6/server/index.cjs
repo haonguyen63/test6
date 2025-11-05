@@ -24,6 +24,8 @@ appNext.prepare().then(() => {
   app.use("/api/auth", require("./routes/auth.cjs"));
   app.use("/api/users", require("./routes/users.cjs"));
   app.use("/api/export", require("./routes/export.cjs"));
+  app.use("/api/customers", require("./routes/customers.cjs"));
+  app.use("/api/pos", require("./routes/pos.cjs"));
 
   app.get("/api/health", (_req, res) => res.json({ ok: true, name: "loyalty-ui", time: Date.now() }));
 

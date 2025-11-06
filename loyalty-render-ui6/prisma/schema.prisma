@@ -1,0 +1,41 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                Int      @id @default(autoincrement())
+  username          String   @unique
+  password          String
+  role              String   // "staff" | "manager" | "admin"
+  name              String
+  phone             String?
+  autoLogoutMinutes Int?
+}
+
+model Customer {
+  id     Int    @id @default(autoincrement())
+  phone  String @unique
+  name   String
+  points Int    @default(0)
+  txs    Tx[]
+}
+
+model Tx {
+  id         Int      @id @default(autoincrement())
+  time       DateTime @default(now())
+  kind       String   // 'earn' | 'redeem'
+  phone      String
+  name       String
+  points     Int      // + for earn, - for redeem
+  amountVND  Int
+  invoiceCode String?
+  staffName   String?
+
+  customer   Customer? @relation(fields: [customerId], references: [id])
+  customerId Int?
+}

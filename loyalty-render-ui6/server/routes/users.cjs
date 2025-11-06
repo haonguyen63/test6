@@ -1,60 +1,61 @@
 const express = require("express");
+const prisma = require("../prisma.cjs");
 const { authMiddleware, requireRole } = require("../utils/auth.cjs");
-const store = require("../store.cjs");
 const router = express.Router();
 
-// GET /api/users
-router.get("/", authMiddleware, requireRole(["admin"]), (_req, res) => {
-  res.json({ users: store.listUsers() });
+router.get("/", authMiddleware, requireRole(["admin"]), async (_req, res) => {
+  const users = await prisma.user.findMany();
+  res.json({ users: users.map(({password, ...u}) => u) });
 });
 
-// POST /api/users  — tạo mới
-// body: {username, password, name, phone, role, autoLogoutMinutes}
-router.post("/", authMiddleware, requireRole(["admin"]), (req, res) => {
+router.post("/", authMiddleware, requireRole(["admin"]), async (req, res) => {
   try {
-    const payload = req.body || {};
-    const created = store.createUser({
-      username: String(payload.username || "").trim(),
-      password: String(payload.password || "").trim(),
-      name: String(payload.name || "").trim(),
-      phone: String(payload.phone || "").trim().replace(/[^\d]/g, ""),
-      role: payload.role || "staff",
-      autoLogoutMinutes: payload.autoLogoutMinutes === "" ? null : payload.autoLogoutMinutes
-    });
-    res.status(201).json({ user: created });
+    const b = req.body || {};
+    const data = {
+      username: String(b.username||"").trim(),
+      password: String(b.password||"").trim(),
+      role: b.role || "staff",
+      name: String(b.name||"").trim(),
+      phone: String(b.phone||"").trim().replace(/[^\d]/g,""),
+      autoLogoutMinutes: b.autoLogoutMinutes === "" ? null : b.autoLogoutMinutes
+    };
+    const created = await prisma.user.create({ data });
+    const { password, ...safe } = created;
+    res.status(201).json({ user: safe });
   } catch (e) {
-    const code = e.message === "USERNAME_EXISTS" ? 409 : 400;
-    res.status(code).json({ error: e.message });
+    if (String(e.message||"").includes("Unique constraint") || String(e.code) === "P2002") {
+      return res.status(409).json({ error: "USERNAME_EXISTS" });
+    }
+    res.status(400).json({ error: "BAD_REQUEST" });
   }
 });
 
-// PUT /api/users/:id — update + reset password (nếu có resetPassword)
-router.put("/:id", authMiddleware, requireRole(["admin"]), (req, res) => {
+router.put("/:id", authMiddleware, requireRole(["admin"]), async (req, res) => {
   const id = Number(req.params.id);
   const { name, phone, username, role, autoLogoutMinutes, resetPassword } = req.body || {};
+  const patch = {
+    ...(name !== undefined ? { name } : {}),
+    ...(phone !== undefined ? { phone: String(phone).replace(/[^\d]/g,"") } : {}),
+    ...(username !== undefined ? { username } : {}),
+    ...(role !== undefined ? { role } : {}),
+    ...(autoLogoutMinutes !== undefined ? { autoLogoutMinutes } : {}),
+  };
+  if (resetPassword && String(resetPassword).length > 0) patch.password = String(resetPassword);
+
   try {
-    const patch = {
-      ...(name !== undefined ? { name } : {}),
-      ...(phone !== undefined ? { phone: String(phone).replace(/[^\d]/g,"") } : {}),
-      ...(username !== undefined ? { username } : {}),
-      ...(role !== undefined ? { role } : {}),
-      ...(autoLogoutMinutes !== undefined ? { autoLogoutMinutes } : {})
-    };
-    if (resetPassword && String(resetPassword).length > 0) {
-      patch.password = String(resetPassword);
-    }
-    const updated = store.updateUser(id, patch);
-    res.json({ ok: true, user: updated });
+    const updated = await prisma.user.update({ where: { id }, data: patch });
+    const { password, ...safe } = updated;
+    res.json({ ok: true, user: safe });
   } catch (e) {
-    const code = e.message === "USERNAME_EXISTS" ? 409 : (e.message === "NOT_FOUND" ? 404 : 400);
-    res.status(code).json({ error: e.message });
+    if (String(e.code) === "P2002") return res.status(409).json({ error: "USERNAME_EXISTS" });
+    if (String(e.code) === "P2025") return res.status(404).json({ error: "NOT_FOUND" });
+    res.status(400).json({ error: "BAD_REQUEST" });
   }
 });
 
-// DELETE /api/users/:id
-router.delete("/:id", authMiddleware, requireRole(["admin"]), (req, res) => {
+router.delete("/:id", authMiddleware, requireRole(["admin"]), async (req, res) => {
   const id = Number(req.params.id);
-  store.deleteUser(id);
+  await prisma.user.delete({ where: { id } }).catch(()=>{});
   res.json({ ok: true });
 });
 

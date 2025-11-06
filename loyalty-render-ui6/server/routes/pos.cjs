@@ -1,67 +1,66 @@
 const express = require("express");
+const prisma = require("../prisma.cjs");
 const { authMiddleware } = require("../utils/auth.cjs");
-const { upsertCustomerByPhone, txs } = require("../db.cjs");
 const router = express.Router();
 
-/** Quy ước đổi điểm:
- *  1.000đ chi tiêu = 1 điểm (pointsFloat = amount/1000).
- *  Làm tròn phần lẻ:
- *   - 0   – <0.5  -> +1 điểm
- *   - 0.5 – <1.0  -> +2 điểm
- *  Ví dụ: 2.30 điểm  -> 2 + 1 = 3; 1.75 -> 1 + 2 = 3
- *  Đổi điểm: 1 điểm = 10đ. Min 50 (500đ), Max 10.000 (100.000đ), và không vượt quá giá trị đơn hàng.
- */
 function calcEarnPoints(amountVND) {
-  const pointsFloat = amountVND / 1000;
-  const base = Math.floor(pointsFloat);
-  const frac = pointsFloat - base;
-  let extra = 0;
-  if (frac > 0 && frac < 0.5) extra = 1;
-  else if (frac >= 0.5) extra = 2;
-  return base + extra;
+  const f = amountVND / 1000;
+  const base = Math.floor(f);
+  const frac = f - base;
+  return base + (frac > 0 && frac < 0.5 ? 1 : (frac >= 0.5 ? 2 : 0));
 }
 
-router.post("/order", authMiddleware, (req, res) => {
-  const { phone, nameIfNew = "", amountVND, redeemPoints = 0, invoiceCode = "", staffName = "" } = req.body || {};
-  const amount = Number(amountVND || 0);
-  let redeem = Math.max(0, Number(redeemPoints || 0));
-
+router.post("/order", authMiddleware, async (req, res) => {
+  const { phone, nameIfNew="", amountVND, redeemPoints=0, invoiceCode="", staffName="" } = req.body || {};
+  const amount = Number(amountVND||0);
+  let redeem = Math.max(0, Number(redeemPoints||0));
   if (!phone) return res.status(400).json({ error: "PHONE_REQUIRED" });
   if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: "AMOUNT_INVALID" });
 
-  const customer = upsertCustomerByPhone(String(phone), String(nameIfNew || "").trim());
+  // upsert customer
+  let customer = await prisma.customer.upsert({
+    where: { phone: String(phone) },
+    update: {},
+    create: { phone: String(phone), name: String(nameIfNew||"") || `Khách ${phone}`, points: 0 }
+  });
 
-  // ràng buộc đổi điểm
-  const maxRedeemByRule = 10000; // điểm
-  const minRedeemByRule = 50;    // điểm
-  const maxRedeemByAmount = Math.floor(amount / 10); // không vượt giá trị đơn hàng (1đ = 10đ)
-  const maxRedeem = Math.min(maxRedeemByRule, maxRedeemByAmount, customer.points);
+  const maxRedeemRule = 10000;
+  const minRedeemRule = 50;
+  const maxRedeemByAmount = Math.floor(amount / 10);
+  const maxRedeemByBalance = customer.points;
+  const maxRedeem = Math.max(0, Math.min(maxRedeemRule, maxRedeemByAmount, maxRedeemByBalance));
 
   if (redeem > 0) {
-    if (redeem < minRedeemByRule) return res.status(400).json({ error: "REDEEM_TOO_SMALL" });
+    if (redeem < minRedeemRule) return res.status(400).json({ error: "REDEEM_TOO_SMALL" });
     if (redeem > maxRedeem) return res.status(400).json({ error: "REDEEM_TOO_LARGE", maxRedeem });
-  } else {
-    redeem = 0;
-  }
+  } else redeem = 0;
 
-  // tính điểm tích
   const earn = calcEarnPoints(amount);
 
-  // cập nhật điểm
-  customer.points = customer.points - redeem + earn;
-
-  // ghi lịch sử (2 bản ghi tách bạch để xuất CSV)
+  // transaction
   const now = new Date();
+  const ops = [];
   if (redeem > 0) {
-    txs.push({
-      time: now, kind: "redeem", phone: customer.phone, name: customer.name,
-      points: -redeem, amountVND: redeem * 10, invoiceCode, staffName
-    });
+    ops.push(prisma.tx.create({
+      data: { time: now, kind: 'redeem', phone: customer.phone, name: customer.name,
+              points: -redeem, amountVND: redeem*10, invoiceCode, staffName,
+              customerId: customer.id }
+    }));
   }
-  txs.push({
-    time: now, kind: "earn", phone: customer.phone, name: customer.name,
-    points: earn, amountVND: amount, invoiceCode, staffName
-  });
+  ops.push(prisma.tx.create({
+    data: { time: now, kind: 'earn', phone: customer.phone, name: customer.name,
+            points: earn, amountVND: amount, invoiceCode, staffName,
+            customerId: customer.id }
+  }));
+
+  // update points
+  ops.push(prisma.customer.update({
+    where: { id: customer.id },
+    data: { points: customer.points - redeem + earn }
+  }));
+
+  const [, , updated] = await prisma.$transaction(ops);
+  customer = updated;
 
   res.json({
     ok: true,
